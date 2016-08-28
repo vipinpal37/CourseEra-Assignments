@@ -1,0 +1,214 @@
+---
+title: "Peer Graded Assignment: Prediction Assignment Writeup"
+author: "Vipin Pal Singh"
+date: "28 August 2016"
+output: html_document
+---
+
+<br>
+
+# Background : 
+
+One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants.  
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+# Expected results :
+
+The goal of this project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set. You may use any of the other variables to predict with. You should create a report describing how you built your model, how you used cross validation, what you think the expected out of sample error is, and why you made the choices you did. You will also use your prediction model to predict 20 different test cases.
+
+<br>
+
+# Data Sources :
+
+The training data for this project are available here:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har. If you use the document you create for this class for any purpose please cite them as they have been very generous in allowing their data to be used for this kind of assignment.
+
+<br>
+
+# Modelling exercise starts here: 
+
+<br>
+
+#### Step 1 : Loading the training and testing datasets from the specified URLs
+
+```{r message=F, warning=F , comment= NA}
+
+train_data_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+test_data_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+ads <- read.csv(url(train_data_url), na.strings=c("NA","#DIV/0!",""))
+ads_testing <- read.csv(url(test_data_url), na.strings=c("NA","#DIV/0!",""))
+
+```
+
+<br>
+
+#### Step 2 : Data Clearning : Null value treatment 
+
+```{r message=F, warning=F , comment= NA}
+
+# Removing redundant variables such as different timestamps, X, user_name which i wont be using in the modelling exercise
+
+ads <- ads[, !names(ads) %in% 
+             c("X", "user_name", "raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp")]
+
+colnames(cbind(ads[sapply(ads, is.factor)], ads[sapply(ads, is.character)]))
+ads$new_window <- ifelse(ads$new_window == "yes",1,0)
+ads_classe <- ads$classe
+
+# Function to remove null values and NA values and replacing it with any specific value in this case "0"
+null_treatment <- function(data, value) { 
+  data[which(is.null(data)| is.na(data))] <- value
+  return(data)
+}
+
+ads <- as.data.frame(apply(ads[,!names(ads) == "classe"], 2, FUN = null_treatment, value = 0))
+ads$classe <- ads_classe
+
+```
+
+<br>
+
+#### Step 3 : Parititioning the training data set into training (60%) AND validation dataset(40%) 
+
+```{r message=F, warning=F , comment= NA}
+
+library('caret')
+set.seed(100)
+sample_60 <- createDataPartition(ads$classe, times = 1 , p = 0.60)
+
+ads_training <- ads[sample_60[[1]],]   # training sample 
+ads_validation <- ads[-sample_60[[1]], ] # validation sample 
+
+# Check the distribution of the dependent variable in the 2 datasets and see it should be around same
+
+prop.table(table(ads_training$classe)) 
+prop.table(table(ads_validation$classe)) 
+
+```
+
+<br>
+
+#### Step 4 : Winzorization of continous variables  #################### 
+```{r message=F, warning=F , comment= NA}
+
+# Continous variables should be winzorised before using regression algorithms since outliers can greatly affect the results. 
+# However for techniques like Random Forest, Rpart its not mandatory 
+
+
+# Taking out the only non-numeric variable i.e. dependent variable "classe" into a separate dataset
+training_classe <- ads_training[,"classe"]
+validation_classe <- ads_validation[,"classe"]
+
+# Function to cap all the continous variables to their "X" percentile in this case "98%"
+
+outlier_treatment <- function(data, q=0.995) { 
+  extrema <- quantile(data, c(q),na.rm=T)  
+  data[which(data > extrema[1] | is.na(data))] <- extrema[1]
+  return(data)
+}
+
+# Applying Winzorization at 98% percentile separately for training dataset and validation dataset
+
+ads_training <- as.data.frame(apply(ads_training[,!names(ads_training) == "classe"],2, outlier_treatment,q=0.98))
+ads_validation<-as.data.frame(apply(ads_validation[,!names(ads_validation)=="classe"],2,outlier_treatment,q=0.98))
+ads_validation$classe <- validation_classe
+
+```
+
+<br>
+
+#### Step 5 : Variable Reduction Techniques  #################### 
+
+```{r message=F, warning=F , comment= NA}
+
+#  Step 5 a) : Filtering out Zero variance variables########
+
+zero_var_variables <- nearZeroVar(ads_training)
+corr_data <- ads_training[, -zero_var_variables]
+
+# Step 5 b) : Running co-relation matrix AND removing one of the variables having co-relation more than 75%    ########
+
+# findCorrelation : checks the absolute values of pair-wise correlations. If two variables have a high correlation, the function looks at the mean absolute correlation of each variable and removes the variable with the largest mean absolute correlation.
+# Other techniques like PCA can also be used to combine this corelated variables into one. In case we get a good results with GLM compared to Random Forest, Rpart we can try to improve the glm predictions using PCA later. 
+
+
+corr_matrix <-cor(corr_data)
+
+correlated_variables <- findCorrelation(corr_matrix, .80)
+modelling_data <- corr_data[,-correlated_variables]
+modelling_data$classe <- training_classe
+
+```
+
+<br>
+
+#### Step 6 : Trying out different models  #################### 
+
+<br>
+
+##### Step 6 a) : Model 1 - Multinomial  ####################################### 
+
+```{r message=F, warning=F , comment= NA}
+
+library('nnet')
+set.seed(1000)
+glm_model <- multinom(classe ~ . , data =  modelling_data, maxit=1000,trace= F)
+pred_class <- predict(glm_model, ads_validation, type = "class")
+confusionMatrix(pred_class, ads_validation$classe)
+
+```
+
+<br>
+
+##### Step 6 b) : Model 2 - RPART  ####################################### 
+
+```{r message=F, warning=F , comment= NA}
+
+set.seed(1000)
+rpart_model <- train(classe ~ ., data =  modelling_data, method = "rpart")
+rpart_model
+
+pred_classe <- predict(rpart_model, newdata = ads_validation)
+confusionMatrix(pred_classe, ads_validation$classe)
+
+```
+
+<br>
+
+##### Step 6 c) : Model 3 - Random Forest ####################################### 
+```{r message=F, warning=F , comment= NA}
+
+library('randomForest')
+set.seed(1500)
+random_forest=randomForest(classe~., data= modelling_data,ntree=500,importance=TRUE)
+random_forest
+
+pred_classe <- predict(random_forest, newdata = ads_validation)
+confusionMatrix(pred_classe, ads_validation$classe)
+
+```
+
+<br>
+
+We saw that Random Forest perfoms far better than the other 2 methods : glm and rpart. 
+The out of sample error in case of Random forest for our 40% validation datasets is 0.37% in the training sample. 
+Hence we select Random Forest to predict our 20 test samples. 
+
+#### Step 7 : Test Data validation  ########################################
+
+```{r message=F, warning=F , comment= NA}
+
+
+Final_predictions <- predict(random_forest, newdata = ads_testing)
+Final_predictions
+
+```
+
+<br>
